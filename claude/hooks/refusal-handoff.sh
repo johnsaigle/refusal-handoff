@@ -44,13 +44,18 @@ if [ -n "$transcript" ] && [ -f "$transcript" ]; then
   fi
 fi
 
-# --- layer 2: canonical refusal phrasing in the final message ---------------
-# Keep this list high-precision: restricted verbs, no bare "can't" / "unable".
-# NOTE: "I can't find X" / "I can't provide X (missing file)" are NOT refusals
-# and deliberately do not match.
-if [ -z "$hit" ]; then
-  if printf '%s' "$last_msg" | grep -qiE \
-    "I (can't|cannot|can not) (help|assist) (with|you)|I'm unable to (help|assist)|I am unable to (help|assist)|I won't be able to (help|assist)|I must decline|I can't comply|I cannot comply|conflicts with .{0,40}Usage Policy|request was declined"; then
+# --- layer 2: canonical refusal phrasing at the START of the final message ---
+# Refusals lead with the phrase; discussion of refusal phrasings mentions them
+# mid-body and must not match. Normalize typographic apostrophes first (models
+# emit U+2019), then require the match to begin within the first 30 chars.
+# Keep high-precision: "I can't find X" / "I can't provide X (missing file)"
+# are NOT refusals and deliberately do not match.
+if [ -z "$hit" ] && [ -n "$last_msg" ]; then
+  msg_start=$(printf '%s' "$last_msg" | sed "s/’/'/g" | head -c 300)
+  lead=$(printf '%s' "$msg_start" | grep -iobE \
+    "I (can't|cannot|can not) (help|assist)|I'm unable to (help|assist)|I am unable to (help|assist)|I won't be able to (help|assist)|I must decline|I can't comply|I cannot comply|conflicts with .{0,40}Usage Policy|request was declined" \
+    2>/dev/null | head -1 | cut -d: -f1)
+  if [ -n "$lead" ] && [ "$lead" -le 30 ]; then
     hit="text"
   fi
 fi

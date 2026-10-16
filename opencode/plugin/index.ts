@@ -1,37 +1,44 @@
 // refusal-handoff — OpenCode V2 plugin
 //
-// Watches native provider HTTP responses (primary agent-loop calls only) for
-// deterministic refusal markers and, on a hit, prompts the SAME session to
-// write a handoff file for a successor model.
+// When the model's response is a refusal, prompts the SAME session to write a
+// handoff file for a successor model. No model calls — deterministic only.
 //
-// Markers (no model calls, pure string match on the raw wire body):
-//   Anthropic : "stop_reason":"refusal"  /  stop_details {type:"refusal"}  /  "category":"cyber"
-//   OpenAI    : message.refusal non-null  /  content part {type:"refusal"}
+// Two detection layers, two transports:
 //
-// Notes:
-// - Structured fields only populate when the provider's safety classifier
-//   intervenes. Soft in-text refusals are invisible here by design (the
-//   Claude Code variant of this project covers those with a text regex).
-// - Response bodies are one-shot streams: we clone() and read the clone in
-//   the background so token streaming to the UI is never delayed.
-// - Plain object export (no "@opencode/plugin" import) so this loads from any
-//   path without a package.json / node_modules.
+// Layer 1 (structured, zero false positives) — http.response hook, HTTP-native
+//   providers only (Anthropic, openai-compatible). Parses the wire payload
+//   (SSE or plain JSON) and matches refusal at FIELD level:
+//   - Anthropic: stop_reason "refusal" / stop_details {type:"refusal"} / refusal block
+//   - OpenAI chat: message.refusal / refusal content part / finish_reason "content_filter"
+//   - OpenAI Responses API: refusal content parts / response.refusal.* events
+//   Field-level parsing is what prevents self-triggering on prose that merely
+//   quotes these markers (that really happened — hence the parser).
+//   NOTE: transports that bypass native HTTP (e.g. Codex over WebSocket) never
+//   reach this hook — that is what the event layer is for.
+//
+// Layer 2 (lead-anchored text match) — ctx.event.subscribe(), fires for EVERY
+//   provider transport. On session.text.ended, test the START of the assistant
+//   text for canonical refusal phrasings. Refusals lead with the phrase;
+//   discussion of refusals mentions it mid-text and must not match.
+//   (This layer caught the real gpt-5.6 case: refusal in plain text with
+//   message.refusal === null.)
+//
+// Both layers share a per-session cooldown. Response bodies are one-shot
+// streams: clone() and read in the background so streaming is never delayed.
 
 const COOLDOWN_MS = 30_000
+// Layer 2 only fires when the refusal phrasing begins the assistant text.
+const MAX_LEAD_CHARS = 30
+const TEXT_ANCHOR_CHARS = 400
 
-// Per-session dedupe so a quoted marker string in the handoff-writing turn
-// (or a retry) can't loop the trigger.
+// Per-session dedupe so a retry can't loop the trigger.
 const lastTrigger = new Map<string, number>()
 
-const REFUSAL_MARKERS = new RegExp(
-  [
-    '"stop_reason"\\s*:\\s*"refusal"', // Anthropic hard refusal
-    '"stop_details"\\s*:\\s*\\{[^}]*"refusal"', // Anthropic structured refusal block
-    '"category"\\s*:\\s*"cyber"', // Anthropic cyber policy category
-    '"type"\\s*:\\s*"refusal"', // OpenAI refusal content part
-    '"refusal"\\s*:\\s*"', // OpenAI message.refusal (string value; `null` never matches)
-  ].join("|"),
-)
+const normalizeApostrophes = (s: string) => s.replace(/[\u2018\u2019]/g, "'")
+
+// Layer 2 list — same as the Claude Code hook in this repo. Keep high-precision.
+const TEXT_REFUSAL =
+  /I (can't|cannot|can not) (help|assist)(?!\s+but)\b|I'm unable to (help|assist)|I am unable to (help|assist)|I won't be able to (help|assist)|I must decline|I can't comply|I cannot comply|conflicts with .{0,40}Usage Policy|request was declined/i
 
 const HANDOFF_INSTRUCTION = `Your previous response was refused by a safety classifier. Before anything else, use the write tool to create a complete handoff file at HANDOFF.md in the current project root, containing these sections:
 
@@ -43,10 +50,151 @@ const HANDOFF_INSTRUCTION = `Your previous response was refused by a safety clas
 
 After writing the file, reply with only the file path and stop. Do not attempt the refused task yourself.`
 
+// Debug goes to a file: opencode captures/routes plugin console output, so
+// stderr is not reliable. Set RH_DEBUG=1 and read /tmp/rh-debug.log.
+import { appendFileSync } from "node:fs"
+
+function debug(...args: unknown[]) {
+  if (!process.env.RH_DEBUG) return
+  try {
+    appendFileSync("/tmp/rh-debug.log", args.map(String).join(" ") + "\n")
+  } catch {
+    /* ignore */
+  }
+}
+
+interface InspectResult {
+  structured: boolean
+  textStart: string
+}
+
+// Parse the wire body — plain JSON or SSE — and inspect payloads at field level.
+// Anything that fails JSON.parse (prose, markdown, logs) is ignored entirely.
+function inspectBody(body: string): InspectResult {
+  let structured = false
+  const texts: string[] = []
+
+  const lines = body.split("\n")
+  const chunks = lines.some((l) => l.startsWith("data:"))
+    ? lines.filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim())
+    : [body]
+
+  for (const chunk of chunks) {
+    if (!chunk || chunk === "[DONE]") continue
+    let obj: any
+    try {
+      obj = JSON.parse(chunk)
+    } catch {
+      continue
+    }
+
+    // --- Anthropic (non-streaming message + message_delta events) ---
+    if (obj.stop_reason === "refusal" || obj.delta?.stop_reason === "refusal")
+      structured = true
+    const stopDetails = obj.stop_details ?? obj.delta?.stop_details
+    if (stopDetails?.type === "refusal") structured = true
+
+    const blocks = Array.isArray(obj.content) ? obj.content : []
+    if (blocks.some((b: any) => b?.type === "refusal")) structured = true
+    for (const b of blocks) if (typeof b?.text === "string") texts.push(b.text)
+    // Anthropic streaming: content_block_delta carries delta.text
+    if (typeof obj.delta?.text === "string") texts.push(obj.delta.text)
+
+    // --- OpenAI Responses API (non-streaming output[], events, item/part done) ---
+    const outputItems = [
+      ...(Array.isArray(obj.output) ? obj.output : []),
+      ...(Array.isArray(obj.response?.output) ? obj.response.output : []),
+      ...(obj.item ? [obj.item] : []),
+      ...(obj.part ? [obj.part] : []),
+    ]
+    for (const item of outputItems) {
+      const parts = Array.isArray(item?.content) ? item.content : [item]
+      for (const p of parts) {
+        if (p?.type === "refusal") structured = true
+        if (p?.type === "output_text" && typeof p.text === "string")
+          texts.push(p.text)
+      }
+    }
+    // Responses API streaming: text + refusal deltas
+    if (obj.type === "response.output_text.delta" && typeof obj.delta === "string")
+      texts.push(obj.delta)
+    if (obj.type === "response.refusal.delta" || obj.type === "response.refusal.done")
+      structured = true
+
+    // --- OpenAI chat completions (non-streaming + streaming deltas) ---
+    for (const choice of Array.isArray(obj.choices) ? obj.choices : []) {
+      if (choice.finish_reason === "content_filter") structured = true
+      const msg = choice.message ?? choice.delta ?? {}
+      if (typeof msg.refusal === "string" && msg.refusal.length > 0)
+        structured = true
+      const parts = Array.isArray(msg.content) ? msg.content : []
+      if (parts.some((p: any) => p?.type === "refusal")) structured = true
+      if (typeof msg.content === "string") texts.push(msg.content)
+    }
+  }
+
+  return {
+    structured,
+    textStart: normalizeApostrophes(texts.join("")).slice(0, TEXT_ANCHOR_CHARS),
+  }
+}
+
+function textIsRefusal(text: string): boolean {
+  const lead = TEXT_REFUSAL.exec(normalizeApostrophes(text).slice(0, TEXT_ANCHOR_CHARS))
+  return !!(lead && lead.index <= MAX_LEAD_CHARS)
+}
+
+// Exported for the detector test suite (test/detector-test.ts).
+export const _inspectBody = inspectBody
+export const _TEXT_REFUSAL = TEXT_REFUSAL
+
 export default {
   id: "refusal-handoff",
   async setup(ctx: any) {
+    const controller = new AbortController()
+
+    const triggerHandoff = (sessionID: string, source: string) => {
+      const now = Date.now()
+      if (now - (lastTrigger.get(sessionID) ?? 0) < COOLDOWN_MS) return
+      lastTrigger.set(sessionID, now)
+      debug("[refusal-handoff] TRIGGER via", source, `session=${sessionID.slice(0, 8)}`)
+      // Fire-and-forget: do NOT await (a turn is finalizing). Prompting the
+      // same session queues the handoff turn at the next turn boundary.
+      void ctx.session
+        .prompt({ sessionID, text: HANDOFF_INSTRUCTION })
+        .catch((err: unknown) =>
+          debug("[refusal-handoff] prompt failed:", String(err)),
+        )
+    }
+
+    // --- Layer 2: event stream (all provider transports) ---
+    void (async () => {
+      try {
+        for await (const ev of ctx.event.subscribe({ signal: controller.signal })) {
+          if (process.env.RH_DEBUG && ev?.type === "session.text.ended") {
+            debug(
+              "[refusal-handoff] text.ended:",
+              JSON.stringify(ev?.data).slice(0, 200),
+            )
+          }
+          if (ev?.type !== "session.text.ended") continue
+          const sessionID: unknown = ev.data?.sessionID
+          const text: unknown = ev.data?.text
+          if (typeof sessionID !== "string" || typeof text !== "string" || !text)
+            continue
+          if (textIsRefusal(text)) triggerHandoff(sessionID, "event:text.ended")
+        }
+      } catch (e) {
+        debug("[refusal-handoff] event subscribe ended:", String(e))
+      }
+    })()
+
+    // --- Layer 1: native HTTP responses (HTTP-native providers only) ---
     const registration = await ctx.session.hook("http.response", (event: any) => {
+      debug(
+        "[refusal-handoff] http.response event",
+        `kind=${event.kind} keys=${Object.keys(event).join(",")}`,
+      )
       // Only the agent loop; skip compaction, title, and transient generate calls.
       if (event.kind !== "primary") return
       if (!event.response?.body) return
@@ -60,22 +208,26 @@ export default {
         .clone()
         .text()
         .then((body: string) => {
-          if (!REFUSAL_MARKERS.test(body)) return
-          lastTrigger.set(sessionID, Date.now())
-          // Fire-and-forget: do NOT await inside the hook (the current turn is
-          // still finalizing). Prompting the same session queues the handoff
-          // turn with the same model.
-          void ctx.session
-            .prompt({ sessionID, text: HANDOFF_INSTRUCTION })
-            .catch((err: unknown) =>
-              console.error("[refusal-handoff] failed to prompt session:", err),
+          const { structured, textStart } = inspectBody(body)
+          if (process.env.RH_DEBUG) {
+            debug(
+              "[refusal-handoff] inspect",
+              `session=${String(sessionID).slice(0, 8)}`,
+              `structured=${structured} textStart=${JSON.stringify(textStart.slice(0, 80))}`,
             )
+          }
+          if (structured) triggerHandoff(sessionID, "http:structured")
+          else if (textIsRefusal(textStart))
+            triggerHandoff(sessionID, "http:text")
         })
         .catch(() => {
           /* stream teardown / aborted requests: nothing to detect */
         })
     })
 
-    return () => registration.dispose()
+    return () => {
+      controller.abort()
+      void registration.dispose()
+    }
   },
 }
