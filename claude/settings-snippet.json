@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/psychopomp/coding/refusal-handoff/claude/hooks/refusal-handoff.sh",
+            "args": [],
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
