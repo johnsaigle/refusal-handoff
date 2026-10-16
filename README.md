@@ -82,7 +82,11 @@ picks up file changes).
 
 ## Install status
 
-Wired on 2026-10-16 (backups: `~/.claude/settings.json.refusal-handoff-backup`,
+Install into a new machine/harness with [`SKILL.md`](SKILL.md) — copy this
+repo to the target, hand the skill to your agent (or follow it manually), and
+it wires both harnesses idempotently, verifies, and uninstalls cleanly.
+
+Wired on this machine on 2026-10-16 (backups: `~/.claude/settings.json.refusal-handoff-backup`,
 `~/.config/opencode/opencode.json.refusal-handoff-backup`):
 
 - `~/.claude/settings.json` → `hooks.Stop` → `claude/hooks/refusal-handoff.sh`
