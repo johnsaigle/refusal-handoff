@@ -8,8 +8,10 @@ description: Install, update, verify, or remove the refusal-handoff integration 
 Deterministic refusal detection for Claude Code and OpenCode. When a model
 response is refused by a provider safety classifier (or leads with canonical
 refusal phrasing), the **same session** is instructed to write a handoff file:
-task summary, completed steps, exactly where it stopped, why, and next steps
-for a successor model. No extra model calls — pure string matching.
+task summary, completed steps, exactly where it stopped, why, next steps
+for a successor model, and the on-disk location of the session's full
+transcript so a successor can recover complete context. No extra model
+calls — pure string matching.
 
 **All paths below are relative to the directory containing this SKILL.md**
 (the cloned repo). Resolve it first and use absolute paths everywhere.

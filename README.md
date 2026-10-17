@@ -36,9 +36,11 @@ test/
 
 Both layers share a 30-second per-session cooldown. The plugin sends the handoff prompt with `ctx.session.prompt` and never awaits it. The prompt executes at the next turn boundary.
 
+The handoff prompt also includes a `SESSION DATA` section naming this session's raw storage — `~/.local/share/opencode/storage/message/<sessionID>/` for message JSON files and `~/.local/share/opencode/storage/session/*/<sessionID>.json` for session metadata — so a successor model can reconstruct full context, not just the summary.
+
 ## Claude Code trigger
 
-The `Stop` hook returns a block decision with an instruction. Claude Code feeds that instruction to the same Claude as its next prompt. The instruction names the handoff path: `$CLAUDE_PROJECT_DIR/.claude/handoffs/<session_id>.md`. Loop guards check `stop_hook_active` and the handoff file. Claude Code also limits stop-hook continuations to eight.
+The `Stop` hook returns a block decision with an instruction. Claude Code feeds that instruction to the same Claude as its next prompt. The instruction names the handoff path: `$CLAUDE_PROJECT_DIR/.claude/handoffs/<session_id>.md`. It also includes the session's `transcript_path` (the JSONL under `~/.claude/projects/`) so a successor can recover full context. Loop guards check `stop_hook_active` and the handoff file. Claude Code also limits stop-hook continuations to eight.
 
 ## The self-trigger lesson
 

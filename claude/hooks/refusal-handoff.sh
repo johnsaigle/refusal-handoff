@@ -65,12 +65,22 @@ fi
 # --- trigger the in-session handoff -----------------------------------------
 mkdir -p "$(dirname "$handoff_file")"
 
+# Session data pointer (issue #1): the hook input carries transcript_path, the
+# exact JSONL a successor session can read to recover full context. Fall back
+# to the projects directory when the path is missing.
+if [ -n "$transcript" ]; then
+  session_data="6. SESSION DATA - the full transcript for this session is at $transcript (JSONL). Read it to recover the complete context beyond this summary."
+else
+  session_data="6. SESSION DATA - the full transcript for this session is under $HOME/.claude/projects/ as <session_id>.jsonl. Read it to recover the complete context beyond this summary."
+fi
+
 reason="Your previous response was refused (detected via $hit marker). Before anything else, use the Write tool to create a complete handoff file at $handoff_file containing these sections:
 1. TASK - a neutral summary of what the user originally asked for.
 2. COMPLETED - every step that was completed before the refusal.
 3. STOPPED AT - exactly where things stopped: quote your refused message and the last successful tool call before it.
 4. REASON - why the request was refused (quote the refusal notice if you have it).
 5. NEXT STEPS - concrete, actionable instructions a successor model would need to continue.
+$session_data
 After writing the file, reply with only the file path and stop. Do not attempt the refused task yourself."
 
 jq -n --arg reason "$reason" '{decision: "block", reason: $reason}'
