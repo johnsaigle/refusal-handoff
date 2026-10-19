@@ -51,12 +51,17 @@ same Claude as its next prompt, and Claude writes
 continuations to eight.
 
 **SessionStart** — a new session opens. Stdout from this event is added to
-the session's context, so the hook injects a pointer to the newest (max 3)
-handoff records in the project: the successor — human- or agent-spun-up,
-same or another harness — learns of the records and the transcript paths
-without the operator relaying anything. The pointer is deliberately a
-pointer: it names files and states that the records are session-state
-documents, not continuation plans. Records silent → no context added.
+the session's context, so the hook injects a pointer to handoff records
+newer than 30 days (newest first, max 3): a successor — human- or
+agent-spun-up, same or another harness — learns the records exist without
+the operator relaying paths. The pointer is informational only: it never
+tells the successor to read or delete records, names them as descriptions
+of past sessions, and says an earlier refusal is history, not a verdict on
+the current task. An earlier directive version ("read any record relevant
+... before answering", "delete records you have consumed") made a fresh
+session anchor on an unrelated old record, refuse by association, and
+delete it (observed live 2026-10-19); the aged fix keeps the handoff
+available for genuine continuations without steering fresh requests.
 
 **SessionEnd** — the session is terminating. This covers the fatal path: when
 Anthropic safeguards flag a turn and no fallback model recovers it, Claude

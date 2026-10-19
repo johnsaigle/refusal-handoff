@@ -61,15 +61,21 @@ handoff_file="$project_dir/.refusal-handoffs/${session_id:-unknown}.md"
 if [ "$event" = "SessionStart" ]; then
   dir="$project_dir/.refusal-handoffs"
   [ -d "$dir" ] || exit 0
+  # Skip records older than 30 days: stale artifacts (often in shared
+  # scratch dirs) should not surface in fresh sessions forever. Guard the
+  # ls call: with zero candidates, ls -t must not fall back to listing the
+  # hook process's current directory.
+  files=$(find "$dir" -maxdepth 1 -name '*.md' -mtime -30 2>/dev/null)
+  [ -n "$files" ] || exit 0
   set --
-  for f in $(command ls -t "$dir"/*.md 2>/dev/null); do
+  for f in $(command ls -t $files); do
     [ -f "$f" ] || continue
     if [ "$#" -lt 3 ]; then set -- "$@" "$f"; fi
   done
   [ "$#" -gt 0 ] || exit 0
-  printf 'NOTE - refusal handoff: earlier session(s) in this project ended on a provider safety refusal and left handoff record(s) in .refusal-handoffs/. Newest first:\n'
-  for f in "$@"; do printf '  - %s (full session transcript path inside, section 6)\n' "$f"; done
-  printf 'Read any record relevant to the current task before answering. The records are session-state documents, not continuation plans; decide next actions yourself and with the operator. Delete records you have consumed.\n'
+  printf 'NOTE - refusal handoff: earlier session(s) in this project ended on a provider safety refusal and left record(s) in .refusal-handoffs/. Newest first:\n'
+  for f in "$@"; do printf '  - %s (the session transcript path is inside, section 6)\n' "$f"; done
+  printf 'These records describe PAST sessions only. A record matters here only if the current task continues the work it describes. An earlier refusal is history, not a verdict on this session: judge each request in this session on its own terms. Leave the records on disk; deleting them is the operator call, not yours.\n'
   exit 0
 fi
 

@@ -124,13 +124,26 @@ out=$(HOOKRUN '{"hook_event_name":"SessionEnd","session_id":"e5","transcript_pat
   check "SessionEnd without transcript: silent, no file" $?
 
 # --- SessionStart pointer ----------------------------------------------------
-out=$(HOOKRUN '{"hook_event_name":"SessionStart","session_id":"p0","cwd":"'"$W"'"}')
+WSTART="$(mktemp -d)"; mkdir -p "$WSTART/.refusal-handoffs"
+HKSTART() { printf '%s' "$1" | CLAUDE_PROJECT_DIR="$WSTART" "$HOOK"; }
+# aging rule: a record older than 30 days must not surface
+touch -t 202601010000 "$WSTART/.refusal-handoffs/old.md"
+out=$(HKSTART '{"hook_event_name":"SessionStart","session_id":"p2","cwd":"'"$WSTART"'"}')
+[ -z "$out" ]; check "SessionStart: record older than 30 days is silent" $?
+# fresh record: pointer with paths and the neutral framing
+printf 'x\n' > "$WSTART/.refusal-handoffs/new.md"
+out=$(HKSTART '{"hook_event_name":"SessionStart","session_id":"p3","cwd":"'"$WSTART"'"}')
 printf '%s' "$out" | grep -q "NOTE - refusal handoff:\|  - " && \
-  printf '%s' "$out" | grep -q "session-state documents, not continuation plans" && \
-  printf '%s' "$out" | grep -q ".refusal-handoffs/"; \
-  check "SessionStart with records: pointer with paths and framing" $?
+  printf '%s' "$out" | grep -q "PAST sessions only" && \
+  printf '%s' "$out" | grep -q "not a verdict on this session" && \
+  printf '%s' "$out" | grep -q "deleting them is the operator call"; \
+  check "SessionStart fresh record: informational pointer, no read-or-delete directive" $?
+# cap at 3
+for x in a b c d; do printf 'x\n' > "$WSTART/.refusal-handoffs/$x.md"; done
+out=$(HKSTART '{"hook_event_name":"SessionStart","session_id":"p4","cwd":"'"$WSTART"'"}')
 printf '%s' "$out" | grep -c "^  - " | grep -q "^3$"; \
   check "SessionStart: pointer caps at 3 records" $?
+rm -rf "$WSTART"
 
 W2="$(mktemp -d)"
 out2=$(printf '%s' '{"hook_event_name":"SessionStart","session_id":"p2","cwd":"'"$W2"'"}' | (cd / && CLAUDE_PROJECT_DIR="$W2" "$HOOK"))

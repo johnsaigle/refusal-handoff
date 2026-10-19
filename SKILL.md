@@ -33,8 +33,14 @@ Wire the SAME script under `SessionEnd` and `SessionStart` too:
 - `SessionEnd` is the only event that fires when a hard refusal kills the
   session (see below).
 - `SessionStart` is the successor-pickup path: its stdout lands in a new
-  session's context, so a successor starting in the same project sees the
-  pointer to unhandled handoff records without the operator copying paths.
+  session's context. The hook injects a short informational pointer to
+  records newer than 30 days (newest first, max 3). The pointer never
+  directs the successor to read a record or delete it — an earlier probe
+  with "read any record relevant ... before answering" made the model
+  anchor on an old refusal and treat it as a verdict on a fresh request,
+  then delete the record (seen live 2026-10-19). The pointer now states
+  that records describe past sessions only and deletion is the operator's
+  call.
 
 ```sh
 REPO=<absolute path to this directory>
