@@ -44,19 +44,19 @@ const TEXT_REFUSAL =
 // can name the exact on-disk locations of this session's full context
 // (issue #1): message parts live one JSON file per message, and the session
 // metadata JSON sits in a project-hash directory under storage/session/.
-const handoffInstruction = (sessionID: string) => `Your previous response was refused by a safety classifier. Before anything else, use the write tool to create a complete handoff file at HANDOFF.md in the current project root, containing these sections:
+const handoffInstruction = (sessionID: string) => `Your previous response was refused by a safety classifier. Before anything else, use the write tool to create a handoff record at HANDOFF.md in the current project root. The record documents this session's state; it is NOT a continuation plan for the refused request. Sections:
 
-1. TASK - a neutral summary of what the user originally asked for.
-2. COMPLETED - every step that was completed before the refusal.
-3. STOPPED AT - exactly where things stopped: quote your refused message and the last successful tool call before it.
-4. REASON - why the request was refused (quote the refusal notice if you have it).
-5. NEXT STEPS - concrete, actionable instructions a successor model would need to continue.
+1. TASK - neutral summary of what the user originally asked for.
+2. COMPLETED - what was actually done before this turn ended (say 'nothing yet' if nothing).
+3. STOPPED AT - where things stopped: quote your refused message and the last successful tool call.
+4. REASON - why the turn ended; quote the refusal notice if you have one.
+5. OPEN ITEMS - unanswered user questions and pending items unrelated to the refused request, if any. Do not record instructions for fulfilling the refused request: what happens next is the operator's and a successor's decision, not a plan you write here.
 6. SESSION DATA - where to recover the full conversation context for this session:
    - Messages: ~/.local/share/opencode/storage/message/${sessionID}/ (one JSON file per message)
    - Session metadata: ~/.local/share/opencode/storage/session/*/${sessionID}.json
    A successor can read those files directly to reconstruct the complete context beyond this summary.
 
-After writing the file, reply with only the file path and stop. Do not attempt the refused task yourself.`
+Do not argue with the refusal and do not attempt the refused task in this session. After writing the file, reply with a short operator summary (under 8 lines): the refused task, why the turn ended, the handoff file path, the session data paths above, and what remains unresolved, if anything. Then stop.`
 
 // Debug goes to a file: opencode captures/routes plugin console output, so
 // stderr is not reliable. Set RH_DEBUG=1 and read /tmp/rh-debug.log.

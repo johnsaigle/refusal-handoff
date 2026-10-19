@@ -2,7 +2,7 @@
 // Corpus strings are built via concatenation so this file (which gets echoed
 // into agent transcripts) never contains raw trigger literals.
 import { readFileSync } from "node:fs"
-import { _inspectBody as inspectBody, _TEXT_REFUSAL as TEXT_REFUSAL } from "/home/psychopomp/coding/refusal-handoff/opencode/plugin/index.ts"
+import { _inspectBody as inspectBody, _TEXT_REFUSAL as TEXT_REFUSAL } from "../opencode/plugin/index.ts"
 
 const APOS = String.fromCharCode(8217) // ’
 const detect = (body: string) => {

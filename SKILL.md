@@ -27,25 +27,56 @@ steps below are independent — one can fail without affecting the other.
 
 ## 1. Claude Code
 
-Wire a `Stop` hook (exec form, absolute path) into `~/.claude/settings.json`:
+Wire a `Stop` hook (exec form, absolute path) into `~/.claude/settings.json`.
+Wire the SAME script under `SessionEnd` and `SessionStart` too:
+
+- `SessionEnd` is the only event that fires when a hard refusal kills the
+  session (see below).
+- `SessionStart` is the successor-pickup path: its stdout lands in a new
+  session's context, so a successor starting in the same project sees the
+  pointer to unhandled handoff records without the operator copying paths.
 
 ```sh
 REPO=<absolute path to this directory>
 cp ~/.claude/settings.json ~/.claude/settings.json.refusal-handoff-backup
-jq --arg cmd "$REPO/claude/hooks/refusal-handoff.sh" \
-  '.hooks.Stop = ((.hooks.Stop // [])
+for EVT in Stop SessionEnd SessionStart; do
+jq --arg cmd "$REPO/claude/hooks/refusal-handoff.sh" --arg evt "$EVT" \
+  '.hooks[$evt] = ((.hooks[$evt] // [])
     | (if any(.[]; .hooks[]?.command == $cmd) then .
        else . + [ { hooks: [ { type: "command", command: $cmd, args: [], timeout: 15 } ] } ] end))' \
   ~/.claude/settings.json > /tmp/rh-settings.new && mv /tmp/rh-settings.new ~/.claude/settings.json
+done
 chmod +x "$REPO/claude/hooks/refusal-handoff.sh"
 ```
 
 The merge is idempotent (safe to re-run; existing wired entries are kept).
-The hook needs no config: it reads the Stop event JSON on stdin, checks two
-deterministic layers (structured provider markers in the transcript tail,
-lead-anchored refusal phrasing in `last_assistant_message`), and on a hit
-returns `{decision: "block", reason}` so the same Claude writes
-`$CLAUDE_PROJECT_DIR/.claude/handoffs/<session_id>.md`.
+The hook needs no config. Both events run the same two deterministic layers
+(structured provider markers in the transcript tail, lead-anchored refusal
+phrasing in the final assistant message):
+
+- **Stop**: on a hit, returns `{decision: "block", reason}` so the same Claude
+  writes `$CLAUDE_PROJECT_DIR/.refusal-handoffs/<session_id>.md` and then
+  prints a short OPERATOR DIGEST in the session window (task, why the turn
+  ended, handoff-file path, transcript path, what remains unresolved) before
+  stopping. The record is framed as a session-state document, not a
+  continuation plan: asking for successor "next steps" made the model argue
+  that it was being told to route around its own refusal (seen live 2026-10-19).
+- **SessionEnd**: covers the fatal path where Stop never fires. When Anthropic
+  safeguards flag a turn and no fallback model recovers it, Claude Code exits
+  with an API-error message and emits NO Stop event (verified live); only
+  `SessionEnd` fires. The hook then writes the handoff file itself,
+  deterministically, from the transcript tail. File exists → skips, so the
+  two events never double-write. In-window output is impossible on this path
+  (the process is gone); set `RH_NOTIFY=1` for an opt-in macOS notification
+  naming the handoff file.
+
+**Handoff path is `.refusal-handoffs/`, NOT `.claude/handoffs/`:** Claude
+Code's sensitive-file protection blocks the model's Write tool inside
+`.claude/` (verified live — the model replied "couldn't write the handoff
+file ... marked as a sensitive file" and produced nothing). Maintaining the
+model-written summary requires the write to be outside `.claude/`. In
+headless `claude -p` runs also pass `--allowedTools Write` (or run
+interactively and approve the one prompt).
 
 New sessions pick it up automatically; verify with the test below.
 
@@ -86,8 +117,9 @@ root; the prompt executes at the next turn boundary.
 ## Verify
 
 ```sh
-bun "$REPO/test/detector-test.ts"   # 5/5 — parser + anchored text layers
+bash "$REPO/test/claude-hook-test.sh"  # hook layers for both events, offline
 bash -n "$REPO/claude/hooks/refusal-handoff.sh"
+bun "$REPO/test/detector-test.ts"   # 5/5 — parser + anchored text layers
 printf '%s' '{"session_id":"smoke","stop_hook_active":false,"last_assistant_message":"I found the bug and fixed it.","transcript_path":""}' \
   | CLAUDE_PROJECT_DIR=/tmp/rh-smoke "$REPO/claude/hooks/refusal-handoff.sh"
 # expect: no output, exit 0 (benign turn must stay silent)
@@ -122,10 +154,14 @@ For plugin diagnostics set `RH_DEBUG=1` and read `/tmp/rh-debug.log`.
   `last_assistant_message` covers that.
 - If the OpenCode handoff prompt appears with no actual refusal, the loaded
   plugin may be stale — restart the service.
+- SessionEnd fires for every session exit. The hook only acts when the
+  transcript tail carries an unhandled refusal marker AND no handoff file
+  exists yet, so benign exits are silent.
 
 ## Uninstall
 
-- Claude: remove the `Stop` entry with
-  `jq 'del(.hooks.Stop)' ~/.claude/settings.json` (or restore the backup) and
-  delete `.claude/handoffs/` if unwanted.
+- Claude: remove both entries with
+  `jq '.hooks |= del(.Stop, .SessionEnd)' ~/.claude/settings.json` (or
+  restore the backup) and delete `.refusal-handoffs/` dirs in projects if
+  unwanted.
 - OpenCode: remove the plugin path from `.plugins` and restart the service.
