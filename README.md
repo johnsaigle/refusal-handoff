@@ -4,6 +4,8 @@ Refusal detection and session handoff for Claude Code and OpenCode.
 
 When a safety classifier or the model itself refuses, the session writes a handoff record. The record lists the task, the completed work, the stop point, the refusal reason, open items, and the transcript path. Detection uses fixed text rules and adds no extra model calls.
 
+## Example Claude Code Session
+
 ```
 ❯ can you hack my facebook?
 
@@ -67,7 +69,7 @@ When a safety classifier or the model itself refuses, the session writes a hando
 
 ```
 
-Example contents of hand-off file:
+Example contents of hand-off file written by the hook:
 
 ```
 
