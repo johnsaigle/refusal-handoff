@@ -2,7 +2,11 @@
 // Corpus strings are built via concatenation so this file (which gets echoed
 // into agent transcripts) never contains raw trigger literals.
 import { readFileSync } from "node:fs"
-import { _inspectBody as inspectBody, _TEXT_REFUSAL as TEXT_REFUSAL } from "../opencode/plugin/index.ts"
+import {
+  _inspectBody as inspectBody,
+  _TEXT_REFUSAL as TEXT_REFUSAL,
+  _POLICY_FLAG as POLICY_FLAG,
+} from "../opencode/plugin/index.ts"
 
 const APOS = String.fromCharCode(8217) // ’
 const detect = (body: string) => {
@@ -56,6 +60,38 @@ const corpusD =
 const corpusE =
   'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"Recall that a refusal typically begins, I can' + APOS + 't help with that request, and ends with alternatives."},"finish_reason":null}]}'
 
+// --- corpus F: policy-flag ERROR terminating a stream (real gpt-6.1-sol
+//     cyber_policy case: legit prose streamed, then the API error event) ---
+const corpusF =
+  'data: {"type":"error","error":{"message":"This content was ' +
+  'flagged for possible cybersecurity' +
+  ' risk.","type":"invalid_request","param":null,' +
+  '"code":"cyber' +
+  '_policy"},"status":400,"sequence_number":54}'
+
+// --- corpus G: benign provider error (must NOT trigger) ---
+const corpusG =
+  'data: {"type":"error","error":{"message":"Incorrect API key provided.","type":"invalid_request","param":null,"code":"invalid_api_key"},"status":401}'
+
+// --- corpus H: opencode session.error-shaped payload (Layer 3 fields) ---
+const sessionErrorCyber = {
+  type: "session.error",
+  data: {
+    sessionID: "ses_test",
+    error: {
+      type: "provider.invalid-request",
+      message: "cyber" + "_policy: This content was " + "flagged for possible cybersecurity" + " risk.",
+    },
+  },
+}
+const sessionErrorBenign = {
+  type: "session.error",
+  data: {
+    sessionID: "ses_test",
+    error: { type: "provider.rate-limited", message: "Rate limit exceeded. Try again in 20 seconds." },
+  },
+}
+
 let fail = 0
 const expect = (label: string, got: boolean, want: boolean) => {
   if (got !== want) fail++
@@ -67,6 +103,18 @@ expect("B structured refusal delta (trigger)", detect(corpusB), true)
 expect("C soft refusal at text start (trigger)", detect(corpusC), true)
 expect("D benign (no trigger)", detect(corpusD), false)
 expect("E refusal phrasing mid-text (no trigger)", detect(corpusE), false)
+expect("F policy-flag error event (trigger)", detect(corpusF), true)
+expect("G benign provider error (no trigger)", detect(corpusG), false)
+expect(
+  "H session.error policy-flag message (Layer 3 regex)",
+  POLICY_FLAG.test(sessionErrorCyber.data.error.message),
+  true,
+)
+expect(
+  "H session.error benign message (Layer 3 regex)",
+  POLICY_FLAG.test(sessionErrorBenign.data.error.message),
+  false,
+)
 
 console.log(fail === 0 ? "ALL PASS" : `FAILURES: ${fail}`)
 process.exit(fail === 0 ? 0 : 1)

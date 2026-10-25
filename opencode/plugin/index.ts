@@ -23,6 +23,17 @@
 //   (This layer caught the real gpt-5.6 case: refusal in plain text with
 //   message.refusal === null.)
 //
+// Layer 3 (policy-flag ERRORS) — refusals can also arrive as provider error
+//   payloads instead of content: an OpenAI Responses stream that terminates
+//   with {"type":"error","error":{"code":"cyber_policy",...}} (real case,
+//   gpt-6.1-sol), or opencode's own session.error event for the failed turn.
+//   The streamed text before the error is legitimate prose, so layers 1's
+//   content markers and layer 2's lead anchor both miss it. Detected in two
+//   places: inspectBody (wire-level error events) and a session.error handler
+//   (covers transports where the body tap does not run). Matching is on
+//   provider error codes and policy-flag phrasing only — plain API failures
+//   (rate limits, auth, invalid request) must not trigger.
+//
 // Both layers share a per-session cooldown. Response bodies are one-shot
 // streams: clone() and read in the background so streaming is never delayed.
 
@@ -39,6 +50,17 @@ const normalizeApostrophes = (s: string) => s.replace(/[\u2018\u2019]/g, "'")
 // Layer 2 list — same as the Claude Code hook in this repo. Keep high-precision.
 const TEXT_REFUSAL =
   /I (can't|cannot|can not) (help|assist)(?!\s+but)\b|I'm unable to (help|assist)|I am unable to (help|assist)|I won't be able to (help|assist)|I must decline|I can't comply|I cannot comply|conflicts with .{0,40}Usage Policy|request was declined/i
+
+// Layer 3 — policy-flag ERROR payloads. Provider refusal codes first (exact,
+// word-bounded), then refusal phrasings that classifiers put in error
+// messages. Applied to error code+message fields only, never to assistant
+// prose, so broad phrasings like "flagged for" stay precise here.
+const POLICY_FLAG =
+  /\b(cyber[_-]?policy|content[_-]?filter|content[_-]?policy|moderation[_-]?blocked)\b|flagged (?:for|by)|was flagged|violates? (?:our|the) .{0,40}policy|content filtering|safety system/i
+
+function isPolicyFlag(text: unknown): boolean {
+  return typeof text === "string" && POLICY_FLAG.test(text)
+}
 
 // The handoff prompt is a function of sessionID so the SESSION DATA section
 // can name the exact on-disk locations of this session's full context
@@ -94,6 +116,15 @@ function inspectBody(body: string): InspectResult {
       obj = JSON.parse(chunk)
     } catch {
       continue
+    }
+
+    // --- provider error events: policy-flag refusals that terminate a stream
+    // (e.g. OpenAI Responses {"type":"error","error":{"code":"cyber_policy"}})
+    // Checked before content sections; never feeds textStart (error text is
+    // not assistant prose).
+    if (obj.type === "error" || obj.error != null) {
+      const err = obj.error ?? {}
+      if (isPolicyFlag(err.code) || isPolicyFlag(err.message)) structured = true
     }
 
     // --- Anthropic (non-streaming message + message_delta events) ---
@@ -155,6 +186,7 @@ function textIsRefusal(text: string): boolean {
 // Exported for the detector test suite (test/detector-test.ts).
 export const _inspectBody = inspectBody
 export const _TEXT_REFUSAL = TEXT_REFUSAL
+export const _POLICY_FLAG = POLICY_FLAG
 
 export default {
   id: "refusal-handoff",
@@ -184,6 +216,19 @@ export default {
               "[refusal-handoff] text.ended:",
               JSON.stringify(ev?.data).slice(0, 200),
             )
+          }
+          // Layer 3: terminal policy-flag errors (the turn failed; the
+          // assistant text, if any, is legitimate prose and won't match).
+          if (ev?.type === "session.error") {
+            const errSessionID: unknown = ev.data?.sessionID
+            const err: any = ev.data?.error
+            if (typeof errSessionID === "string" && err) {
+              const code = typeof err.code === "string" ? err.code : ""
+              const message = typeof err.message === "string" ? err.message : ""
+              if (isPolicyFlag(code) || isPolicyFlag(message))
+                triggerHandoff(errSessionID, "event:session.error")
+            }
+            continue
           }
           if (ev?.type !== "session.text.ended") continue
           const sessionID: unknown = ev.data?.sessionID
