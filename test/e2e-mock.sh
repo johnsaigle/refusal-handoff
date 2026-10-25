@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # Tier 1: deterministic end-to-end test of the refusal-handoff OpenCode plugin.
 #
-# Runs a real `opencode run` against a local mock OpenAI-compatible server that
-# always refuses with a structured refusal marker. Passes only if:
+# Usage: e2e-mock.sh [refusal|error]   (default: refusal)
+#
+# SCENARIOS
+#   refusal — mock answers the first turn with a structured refusal marker
+#             (message.refusal on the wire).
+#   error   — mock streams benign text, then terminates the turn with a
+#             policy-flag error event (no refusal marker in content). This is
+#             the field failure shape that slipped past both original layers.
+#
+# Passes only if:
 #   1. the mock saw >= 2 chat requests (refusal turn + handoff turn)
 #   2. request #2 contains the plugin's handoff instruction (same-session trigger fired)
 #   3. HANDOFF.md exists in the test project with the required sections
@@ -10,8 +18,14 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIR=/tmp/opencode/rh-e2e
-PORT=18923
+SCENARIO="${1:-refusal}"
+case "$SCENARIO" in
+  refusal) PORT=18923 ;;
+  error)   PORT=18924 ;;
+  *) echo "unknown scenario: $SCENARIO (use refusal|error)"; exit 1 ;;
+esac
+export MOCK_SCENARIO=$SCENARIO
+DIR=/tmp/opencode/rh-e2e-$SCENARIO
 export MOCK_PORT=$PORT
 export MOCK_LOG="$DIR/requests.log"
 export HANDOFF_DIR="$DIR"

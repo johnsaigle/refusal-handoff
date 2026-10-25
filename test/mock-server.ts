@@ -3,6 +3,9 @@
 // Behavior:
 //   request with last message role=user and NO "handoff" in text
 //     -> refusal response (structured marker on the wire: "refusal":"...")
+//        OR, when MOCK_SCENARIO=error, benign text streamed and then the
+//        stream terminated by a policy-flag error event (the shape that
+//        slipped past both detection layers in the field).
 //   request with last message role=user containing "handoff"
 //     -> write tool call creating $HANDOFF_DIR/HANDOFF.md
 //   request with last message role=tool (tool result)
@@ -40,6 +43,12 @@ A successor model should evaluate the request under its own policies.
 `
 
 const REFUSAL_TEXT = "I'm sorry, but I can't help with that request."
+
+// MOCK_SCENARIO=error: legit prose, then the turn dies with a policy-flag
+// error event instead of any refusal marker in content.
+const SCENARIO = process.env.MOCK_SCENARIO ?? "refusal"
+const ERROR_MESSAGE =
+  "cyber_policy: This content was flagged for possible cybersecurity risk."
 
 import { appendFileSync } from "node:fs"
 
@@ -80,6 +89,29 @@ async function handleChat(body: any): Promise<Response> {
   logRequest({ n: requestCount, role: lastRole, text: lastText })
 
   let payload: { delta: any; finish: string | null }[]
+
+  const isErrorTurn =
+    SCENARIO === "error" && lastRole === "user" && !/handoff/i.test(lastText)
+
+  if (isErrorTurn && stream) {
+    // Stream benign text, then terminate with an OpenAI-style mid-stream
+    // error event. No refusal marker ever appears in content; the refusal
+    // exists only as the error payload. No [DONE]: the provider closes
+    // after an error.
+    const sse =
+      chatChunk(model, { role: "assistant", content: "Working on it now." }, null) +
+      `data: ${JSON.stringify({
+        error: {
+          message: ERROR_MESSAGE,
+          type: "invalid_request",
+          param: null,
+          code: "cyber_policy",
+        },
+      })}\n\n`
+    return new Response(sse, {
+      headers: { "content-type": "text/event-stream" },
+    })
+  }
 
   if (lastRole === "user" && /handoff/i.test(lastText)) {
     // Handoff turn: emit a real write tool call.
@@ -130,6 +162,20 @@ async function handleChat(body: any): Promise<Response> {
   }
 
   if (!stream) {
+    if (isErrorTurn) {
+      // Non-streaming equivalent: error body, 400 status.
+      return Response.json(
+        {
+          error: {
+            message: ERROR_MESSAGE,
+            type: "invalid_request",
+            param: null,
+            code: "cyber_policy",
+          },
+        },
+        { status: 400 },
+      )
+    }
     // Non-streaming: fold into a single completion object.
     const text = payload
       .map((p) => (typeof p.delta.content === "string" ? p.delta.content : ""))
